@@ -136,9 +136,9 @@ export default function App() {
                 compact
                 checked={showOverlap}
                 onChange={setShowOverlap}
-                disabled={!showGrid || layout.overlapCm === 0}
+                disabled={!showGrid || layout.hiddenCm === 0}
               >
-                Overlap
+                {layout.settings.join === 'trim' ? 'Overlap' : 'Covered'}
               </Check>
               <div className="slider" style={{ width: 132 }}>
                 <input
@@ -178,12 +178,20 @@ export default function App() {
             </div>
 
             <div className="legend">
-              <span>
-                <i style={{ background: '#fff' }} /> seam — where the next sheet's cut edge lands
-              </span>
-              {layout.overlapCm > 0 && (
+              {layout.gutterCm > 0 ? (
                 <span>
-                  <i style={{ background: MARK_COLORS.magenta, opacity: 0.45 }} /> shared overlap strip
+                  <i style={{ background: '#f2f2f2' }} /> {(layout.gutterCm * 10).toFixed(1)} mm white
+                  line your printer cannot reach
+                </span>
+              ) : (
+                <span>
+                  <i style={{ background: '#fff' }} /> seam — where the next sheet's edge lands
+                </span>
+              )}
+              {layout.hiddenCm > 0 && (
+                <span>
+                  <i style={{ background: MARK_COLORS.magenta, opacity: 0.45 }} />{' '}
+                  {layout.settings.join === 'trim' ? 'shared overlap strip' : 'strip the next sheet covers'}
                 </span>
               )}
               <span>

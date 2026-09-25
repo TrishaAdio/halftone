@@ -11,12 +11,12 @@
 
 import JSZip from 'jszip';
 import { PDFDocument } from 'pdf-lib';
-import { renderAssemblyMap } from './assemblyMap.ts';
+import { assemblySteps, joinLabel, printSteps, renderAssemblyMap } from './assemblyMap.ts';
 import { tileFileName, type Layout, type Tile } from './layout.ts';
 import { pngBlobWithDpi } from './png.ts';
 import { renderTile } from './renderTile.ts';
 import { breathe, canvasToBlob, release } from './resample.ts';
-import { cmToPt, SHEETS } from './units.ts';
+import { cmToPt, fmtMm, SHEETS } from './units.ts';
 
 export type RasterFormat = 'png' | 'jpeg';
 
@@ -230,7 +230,18 @@ export async function buildPdf(
 export function printInstructions(layout: Layout, meta: ExportMeta): string {
   const L = layout;
   const s = L.settings;
-  const overlap = L.overlapCm > 0;
+  const wrapAt = (str: string, width: number, indent: string) => {
+    const out: string[] = [];
+    let line = '';
+    for (const word of str.split(' ')) {
+      if ((line + ' ' + word).trim().length > width && line) {
+        out.push(line);
+        line = word;
+      } else line = (line ? line + ' ' : '') + word;
+    }
+    if (line) out.push(line);
+    return out.map((l, i) => (i === 0 ? l : indent + l));
+  };
   return [
     `TileCraft — ${baseName(meta.fileName)}`,
     ''.padEnd(60, '='),
@@ -241,47 +252,35 @@ export function printInstructions(layout: Layout, meta: ExportMeta): string {
     `Paper             ${SHEETS[s.sheet].label} ${s.orientation} (${L.sheetCm.w} x ${L.sheetCm.h} cm)`,
     `Export density    ${s.dpi} DPI -> ${L.sheetPx.w} x ${L.sheetPx.h} px per sheet`,
     `Effective detail  ${Math.round(L.effectiveDpi)} DPI of real source pixels`,
-    `Margin to trim    ${(L.marginCm * 10).toFixed(0)} mm on each edge`,
-    `Seam overlap      ${overlap ? `${(L.overlapCm * 10).toFixed(1)} mm shared between neighbours` : 'none (butt joint)'}`,
+    `Join              ${joinLabel(L)}`,
+    s.join === 'borderless'
+      ? `Bleed per edge    ${fmtMm(L.bleedCm)} (set driver Expansion to Standard)`
+      : `Printer margin    ${fmtMm(L.marginCm)} each edge${s.join === 'trim' ? ', trimmed off' : ', cannot print here'}`,
+    L.gutterCm > 0
+      ? `White line/seam   ${fmtMm(L.gutterCm)} (${(L.inkedFraction * 100).toFixed(1)}% of the picture is inked)`
+      : `Seams             seamless`,
+    L.hiddenCm > 0
+      ? `${(s.join === 'trim' ? 'Overlap per seam' : 'Covered strip').padEnd(18)}${fmtMm(L.hiddenCm)}`
+      : null,
     '',
     'PRINTING',
     ''.padEnd(60, '-'),
-    '1. Print at 100% scale. In the print dialog choose "Actual size" and',
-    '   turn OFF "Fit to page", "Shrink oversized pages" and "Scale to fit".',
-    '2. Check sheet 1 with a ruler before printing the rest: the image block',
-    `   should measure ${L.printableCm.w.toFixed(1)} x ${L.printableCm.h.toFixed(1)} cm between the trim lines.`,
-    '3. Keep every sheet in the same orientation; the margin marks include a',
-    '   TOP arrow if sheets get shuffled.',
+    ...printSteps(L).flatMap((step, i) => wrapAt(`${i + 1}. ${step}`, 68, '   ')),
     '',
     'ASSEMBLY',
     ''.padEnd(60, '-'),
-    ...(overlap
-      ? [
-          '1. Lay the sheets out using the assembly map, row by row.',
-          '2. Trim ONLY the left and top margin of each sheet. Cut along the',
-          '    inside edge of the bold dashed line.',
-          '3. Place R1-C1 first. Lay each following sheet on top of its',
-          '    neighbour so the cut edge sits on the dashed guide line inside',
-          '    the tinted overlap strip.',
-          '4. Confirm the corner L-marks line up across the seam, then tape or',
-          '    glue. Work left to right, then downward.',
-        ]
-      : [
-          '1. Lay the sheets out using the assembly map, row by row.',
-          '2. Trim every edge that meets another sheet, cutting along the inside',
-          '    edge of the bold dashed line.',
-          '3. Butt the cut edges together and match the corner L-marks, then',
-          '    tape the seam from behind.',
-        ]),
+    ...assemblySteps(L).flatMap((step, i) => wrapAt(`${i + 1}. ${step}`, 68, '   ')),
     '',
     'NOTES',
     ''.padEnd(60, '-'),
     '- Colours assume sRGB. Printer, driver and paper calibration will shift',
     '  the result; print one sheet as a test first.',
     '- The last column and/or row can be narrower than the others. That is',
-    '  correct: their trim lines sit inside the printable area.',
+    '  correct: those sheets simply carry less picture.',
     '',
-  ].join('\n');
+  ]
+    .filter((l): l is string => l !== null)
+    .join('\n');
 }
 
 /** Rough download-size estimate for the UI. Photographic content, 24-bit. */

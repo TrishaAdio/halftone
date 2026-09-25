@@ -4,13 +4,15 @@ import {
   MAX_ROWS,
   cleanFits,
   gridBasics,
+  idIsPermanent,
+  marksAvailable,
   suggestGrid,
   type Layout,
   type MarkColor,
   type MarkOptions,
   type Settings,
 } from '../core/layout.ts';
-import { SHEETS, type SheetId } from '../core/units.ts';
+import { isBorderlessCapable, SHEETS, type SheetId } from '../core/units.ts';
 import { Check, Field, NumberInput, Section, Segmented, Slider } from './ui.tsx';
 import { useState } from 'react';
 
@@ -60,6 +62,8 @@ export function Controls({ settings: s, layout: L, patch, patchMarks }: Controls
       : [];
 
   const mm = (cm: number) => `${(cm * 10).toFixed(cm * 10 < 10 ? 1 : 0)} mm`;
+  const avail = marksAvailable(s);
+  const permanentId = idIsPermanent(s);
 
   return (
     <>
@@ -223,12 +227,125 @@ export function Controls({ settings: s, layout: L, patch, patchMarks }: Controls
       </Section>
 
       <Section
-        title="Trim & overlap"
-        tag={`${mm(L.marginCm)}${L.overlapCm > 0 ? ` + ${mm(L.overlapCm)}` : ''}`}
+        title="Joining the sheets"
+        tag={L.gutterCm > 0 ? `${mm(L.gutterCm)} lines` : 'seamless'}
       >
+        <Segmented
+          accent
+          value={s.join}
+          onChange={(join) => patch({ join })}
+          options={[
+            { value: 'nocut', label: 'No cutting', title: 'Assemble whole sheets — white lines at the seams' },
+            { value: 'trim', label: 'Trim & overlap', title: 'Seamless, but every sheet must be cut' },
+            { value: 'borderless', label: 'Borderless', title: 'Seamless with no cutting — needs 10×15 or 13×18 paper' },
+          ]}
+        />
+
+        {s.join === 'nocut' && (
+          <>
+            <Field label="Where the next sheet goes">
+              <Segmented
+                value={s.placement}
+                onChange={(placement) => patch({ placement })}
+                options={[
+                  { value: 'tight', label: `On the ink · ${mm(L.marginCm)}` },
+                  { value: 'butt', label: `Edges touch · ${mm(L.marginCm * 2)}` },
+                ]}
+              />
+            </Field>
+            <div className="footnote">
+              {s.placement === 'tight'
+                ? `Lay each sheet so its edge covers the dashed line on its neighbour's ink. Overshooting is harmless — the white line stays ${mm(
+                    L.gutterCm,
+                  )} either way — so it is forgiving to do by hand, and it hides the sheet ids.`
+                : `Butt the paper edges so they just touch. Nothing to judge at all, but two unprinted edges meet, so the white line is twice as wide: ${mm(
+                    L.gutterCm,
+                  )}.`}
+            </div>
+            {s.placement === 'tight' && (
+              <Field
+                label="Ink sacrificed under the next sheet"
+                hint={`${L.stepCm.w.toFixed(1)} × ${L.stepCm.h.toFixed(1)} cm gain per sheet`}
+              >
+                <Slider
+                  min={0.2}
+                  max={1.5}
+                  step={0.05}
+                  value={s.coverCm}
+                  onChange={(coverCm) => patch({ coverCm })}
+                  format={mm}
+                />
+              </Field>
+            )}
+          </>
+        )}
+
+        {s.join === 'trim' && (
+          <>
+            <Check checked={s.overlapEnabled} onChange={(overlapEnabled) => patch({ overlapEnabled })}>
+              Overlap seams (recommended)
+            </Check>
+            {s.overlapEnabled && (
+              <Field
+                label="Shared strip per seam"
+                hint={`${L.stepCm.w.toFixed(1)} × ${L.stepCm.h.toFixed(1)} cm gain per sheet`}
+              >
+                <Slider
+                  min={0.1}
+                  max={1.5}
+                  step={0.05}
+                  value={s.overlapCm}
+                  onChange={(overlapCm) => patch({ overlapCm })}
+                  format={mm}
+                />
+              </Field>
+            )}
+            <div className="footnote">
+              {s.overlapEnabled
+                ? 'Seamless, at the price of trimming the left and top edge of every sheet. Neighbours repeat this strip, so a cut that wanders by less than its width still leaves no gap.'
+                : 'Seamless, but every seam must be cut on both sheets and butted exactly on the line.'}
+            </div>
+          </>
+        )}
+
+        {s.join === 'borderless' && (
+          <>
+            <Field label="Bleed per edge" hint="driver Expansion: Standard">
+              <Slider
+                min={0}
+                max={0.8}
+                step={0.05}
+                value={s.bleedCm}
+                onChange={(bleedCm) => patch({ bleedCm })}
+                format={mm}
+              />
+            </Field>
+            <div className="footnote">
+              Truly seamless and no cutting — but only on paper your printer can print edge to edge.
+              On the L3200 series that means {SHEETS.P10x15.label} or {SHEETS.P13x18.label}, not A4.
+              The driver enlarges each page and sprays the excess off the paper; this bleed is the
+              extra picture that gets sprayed away, so the join lands where it should.
+            </div>
+            {!isBorderlessCapable(s.sheet) && (
+              <div className="row">
+                {(['P13x18', 'P10x15'] as SheetId[]).map((id) => (
+                  <button
+                    key={id}
+                    type="button"
+                    className="btn sm"
+                    onClick={() => patch({ sheet: id })}
+                  >
+                    Use {SHEETS[id].label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+
         <Field
-          label="Printer margin, each edge"
-          hint={`image block ${L.printableCm.w.toFixed(1)} × ${L.printableCm.h.toFixed(1)} cm`}
+          label={s.join === 'borderless' ? 'Printer margin (not used)' : 'Printer margin, each edge'}
+          hint={`printed block ${L.printableCm.w.toFixed(1)} × ${L.printableCm.h.toFixed(1)} cm`}
         >
           <Slider
             min={0}
@@ -239,60 +356,62 @@ export function Controls({ settings: s, layout: L, patch, patchMarks }: Controls
             format={mm}
           />
         </Field>
-        <div className="footnote">
-          Almost no home printer reaches the paper edge. This band is left blank, carries the marks,
-          and gets cut off.
+        <div className="row">
+          <button type="button" className="btn sm" onClick={() => patch({ marginCm: 0.3 })}>
+            Epson L3200 · 3 mm
+          </button>
+          <button type="button" className="btn sm" onClick={() => patch({ marginCm: 0.5 })}>
+            Safe · 5 mm
+          </button>
         </div>
-        <Check checked={s.overlapEnabled} onChange={(overlapEnabled) => patch({ overlapEnabled })}>
-          Overlap seams (recommended)
-        </Check>
-        {s.overlapEnabled && (
-          <Field
-            label="Shared strip per seam"
-            hint={`${L.stepCm.w.toFixed(1)} × ${L.stepCm.h.toFixed(1)} cm net per sheet`}
-          >
-            <Slider
-              min={0.1}
-              max={1.5}
-              step={0.05}
-              value={s.overlapCm}
-              onChange={(overlapCm) => patch({ overlapCm })}
-              format={mm}
-            />
-          </Field>
-        )}
         <div className="footnote">
-          {s.overlapEnabled
-            ? 'Neighbouring sheets repeat this strip of picture, so a cut that wanders by less than the strip width still leaves no white gap. Each sheet covers less ground, so you may need one more row or column.'
-            : 'Without an overlap every seam is a butt joint: both edges must be cut exactly on the line.'}
+          {s.join === 'nocut'
+            ? 'The band your printer physically cannot reach. It is what creates the white lines, so measure it from a test print if the lines come out wider than expected.'
+            : 'Almost no home printer reaches the paper edge. This band stays blank, carries the marks, and gets cut off.'}
         </div>
       </Section>
 
-      <Section title="Assembly marks" defaultOpen={false} tag={markCount(s.marks)}>
-        <Check compact checked={s.marks.trimLines} onChange={(v) => patchMarks({ trimLines: v })}>
-          Dashed trim lines
-        </Check>
-        <Check compact checked={s.marks.cornerMarks} onChange={(v) => patchMarks({ cornerMarks: v })}>
-          Corner registration L-marks
-        </Check>
-        <Check compact checked={s.marks.edgeTicks} onChange={(v) => patchMarks({ edgeTicks: v })}>
-          Mid-edge skew ticks
-        </Check>
-        <Check
-          compact
-          checked={s.marks.overlapGuides}
-          disabled={!s.overlapEnabled}
-          onChange={(v) => patchMarks({ overlapGuides: v })}
-          title={s.overlapEnabled ? undefined : 'Needs seam overlap'}
-        >
-          Overlap alignment guides
-        </Check>
+      <Section title="Assembly marks" defaultOpen={false} tag={markCount(s.marks, avail)}>
+        {avail.trimLines && (
+          <Check compact checked={s.marks.trimLines} onChange={(v) => patchMarks({ trimLines: v })}>
+            Dashed trim lines
+          </Check>
+        )}
+        {avail.cornerMarks && (
+          <Check
+            compact
+            checked={s.marks.cornerMarks}
+            onChange={(v) => patchMarks({ cornerMarks: v })}
+          >
+            Corner registration L-marks
+          </Check>
+        )}
+        {avail.edgeTicks && (
+          <Check compact checked={s.marks.edgeTicks} onChange={(v) => patchMarks({ edgeTicks: v })}>
+            Mid-edge skew ticks
+          </Check>
+        )}
+        {avail.overlapGuides && (
+          <Check
+            compact
+            checked={s.marks.overlapGuides}
+            onChange={(v) => patchMarks({ overlapGuides: v })}
+          >
+            {s.join === 'trim' ? 'Overlap alignment guides' : 'Dashed "cover to here" line'}
+          </Check>
+        )}
         <Check compact checked={s.marks.tileId} onChange={(v) => patchMarks({ tileId: v })}>
-          Sheet id and spec in the margin
+          {permanentId ? 'Sheet id — stays on the poster' : 'Sheet id and spec'}
         </Check>
-        <Check compact checked={s.marks.orientation} onChange={(v) => patchMarks({ orientation: v })}>
-          TOP orientation arrow
-        </Check>
+        {avail.orientation && (
+          <Check
+            compact
+            checked={s.marks.orientation}
+            onChange={(v) => patchMarks({ orientation: v })}
+          >
+            TOP orientation arrow
+          </Check>
+        )}
         <Field label="Mark colour">
           <div className="swatches">
             {(Object.keys(MARK_COLORS) as MarkColor[]).map((c) => (
@@ -309,17 +428,20 @@ export function Controls({ settings: s, layout: L, patch, patchMarks }: Controls
           </div>
         </Field>
         <div className="footnote">
-          Marks only ever land in the margin you cut away, or inside the overlap strip that the next
-          sheet covers. None of them can end up on the finished poster.
+          {permanentId
+            ? 'Nothing is cut and nothing is covered in this mode, so any mark is permanent ink on the finished poster. Only the id is offered, and it is printed faint in a corner.'
+            : s.join === 'trim'
+              ? 'Marks only ever land in the margin you cut away, or inside the overlap strip the next sheet covers. None of them can end up on the finished poster.'
+              : 'There is no margin to print in here, so every mark lives inside the strip the next sheet is laid over. They vanish as you assemble.'}
         </div>
       </Section>
     </>
   );
 }
 
-function markCount(m: MarkOptions): string {
-  const n = [m.trimLines, m.cornerMarks, m.edgeTicks, m.overlapGuides, m.tileId, m.orientation].filter(
-    Boolean,
-  ).length;
-  return `${n}/6`;
+function markCount(m: MarkOptions, avail: Record<string, boolean>): string {
+  const keys = ['trimLines', 'cornerMarks', 'edgeTicks', 'overlapGuides', 'tileId', 'orientation'] as const;
+  const usable = keys.filter((k) => avail[k]);
+  const on = usable.filter((k) => m[k]).length;
+  return `${on}/${usable.length}`;
 }

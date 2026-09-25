@@ -1,35 +1,41 @@
 /**
  * Tiling geometry.
  *
- * ── The model ────────────────────────────────────────────────────────────────
+ * ── One formula, three ways to join sheets ───────────────────────────────────
  * Poster coordinates are centimetres, origin at the top-left of the *printed
- * image*. The image occupies [0, imageCm.w] × [0, imageCm.h].
+ * image*. Per axis, with sheet size S and unprintable margin m:
  *
- * Each sheet can carry image content only inside its printable box:
- *     printable = sheet − 2 × margin
+ *     printable P = S − 2m          the band of paper that can carry ink
+ *     step        = (see below)     distance from one sheet's window to the next
+ *     hidden      = (see below)     strip of this sheet's ink the next one covers
+ *     span(n)     = (n−1)·step + P
+ *     gutter      = step − (P − hidden)    unprinted gap left between sheets
  *
- * When overlap (bleed) is on, neighbouring sheets duplicate a strip of width
- * `overlap` so a trimming error of less than `overlap` still leaves no white
- * gap. That makes the *net* contribution of each sheet — the step from one
- * sheet's origin to the next — smaller than its printable box:
- *     step = printable − overlap
+ *   trim        step = P − overlap      gutter 0      needs scissors
+ *   nocut/butt  step = S                gutter 2m     paper edges touch
+ *   nocut/tight step = S − m − cover    gutter m      next sheet laid on the ink
+ *   borderless  step = S, m = 0         gutter 0      needs borderless paper
  *
- * So a cols × rows grid spans:
- *     gridCm.w = cols × step.w + overlap        (cols = 1 → exactly printable.w)
- *     gridCm.h = rows × step.h + overlap
+ * The important consequence, and the reason `nocut` exists at all: a printer
+ * that cannot print its outer 3 mm leaves that band at the extreme edge of the
+ * sheet, where it is always the topmost layer at a seam. No overlap can hide
+ * it. So without cutting, a gutter is unavoidable — the honest thing to do is
+ * make it uniform, put it exactly where the geometry says, and drop the sliver
+ * of picture that falls inside it so everything still lines up across the gap.
  *
- * Tile (r, c) puts poster-x [c·step.w, c·step.w + printable.w] on paper, offset
- * by `margin` from the paper edge. Where that box runs past the image (last row
- * or column, or a deliberately over-sized grid) the tile is *partial*: it holds
- * less content and its trim box shrinks to match. Tiles with no content at all
- * are dropped from the export.
+ * `tight` halves that gutter: lay each new sheet so its edge lands on the ink of
+ * the one before it instead of against its paper edge. Overshooting is safe —
+ * the gutter stays m either way — which makes it forgiving to do by hand.
  */
 
 import {
   CM_PER_INCH,
   clamp,
+  expand,
   intersect,
+  isBorderlessCapable,
   pxPerCm,
+  SHEETS,
   sheetSizeCm,
   type Orientation,
   type Rect,
@@ -41,6 +47,11 @@ const EPS = 1e-7;
 
 export type SizingMode = 'grid' | 'target';
 export type TargetAxis = 'width' | 'height';
+
+/** How the printed sheets are joined into a poster. */
+export type JoinStyle = 'trim' | 'nocut' | 'borderless';
+/** Only meaningful for `nocut`. */
+export type Placement = 'butt' | 'tight';
 
 export interface MarkOptions {
   cornerMarks: boolean;
@@ -65,29 +76,46 @@ export interface Settings {
   sheet: SheetId;
   orientation: Orientation;
   dpi: number;
+  /** Unprintable margin per edge. Ignored when joining borderless. */
   marginCm: number;
+
+  join: JoinStyle;
+  /** `trim` only: seams share a strip so a wandering cut leaves no gap. */
   overlapEnabled: boolean;
   overlapCm: number;
+  /** `nocut` only. */
+  placement: Placement;
+  /** `nocut`/`tight` only: ink deliberately sacrificed under the next sheet. */
+  coverCm: number;
+  /** `borderless` only: compensation for the driver's edge-to-edge expansion. */
+  bleedCm: number;
 
   mode: SizingMode;
-  /** Grid mode */
   cols: number;
   rows: number;
   autoRows: boolean;
-  /** Target-size mode */
   targetAxis: TargetAxis;
   targetCm: number;
 
   marks: MarkOptions;
 }
 
+/**
+ * Defaults aimed at the common case: a home EcoTank that cannot print to the
+ * edge of A4, in the hands of someone who does not want to trim 20 sheets.
+ */
 export const DEFAULT_SETTINGS: Settings = {
   sheet: 'A4',
   orientation: 'portrait',
   dpi: 300,
-  marginCm: 0.5,
+  marginCm: 0.3,
+
+  join: 'nocut',
   overlapEnabled: true,
   overlapCm: 0.4,
+  placement: 'tight',
+  coverCm: 0.4,
+  bleedCm: 0.3,
 
   mode: 'target',
   cols: 3,
@@ -111,13 +139,14 @@ export interface Tile {
   row: number; // 0-based
   col: number;
   id: string; // "R2-C3"
-  /** Content rect in poster cm (the slice of the image this sheet carries). */
+  /** True slice of the poster this sheet carries, in poster cm. */
   contentCm: Rect;
-  /** Source crop in image pixels. */
+  /** Source crop in image pixels (includes bleed when printing borderless). */
   srcPx: Rect;
-  /** Where the content lands on the sheet, in cm from the sheet's top-left. */
+  /** Where that crop lands on the sheet, in cm from the sheet's top-left. */
   placeCm: Rect;
-  /** True when the sheet is not filled edge-to-edge of its printable box. */
+  /** The content rect on the sheet — what marks are drawn around. */
+  trimCm: Rect;
   partial: boolean;
   neighbors: { left: boolean; right: boolean; top: boolean; bottom: boolean };
 }
@@ -125,33 +154,32 @@ export interface Tile {
 export interface Layout {
   settings: Settings;
   imagePx: Size;
-  /** Physical size of the printed image. */
   imageCm: Size;
-  /** Physical span of the whole sheet grid (≥ imageCm). */
   gridCm: Size;
   sheetCm: Size;
   printableCm: Size;
-  /** Net per-sheet contribution = printable − overlap. */
   stepCm: Size;
-  /** Effective overlap after clamping (0 when disabled). */
-  overlapCm: number;
+  /** Strip of each sheet's ink that the next sheet covers (0 when nothing does). */
+  hiddenCm: number;
+  /** Unprinted gap left between neighbouring sheets (0 for seamless joins). */
+  gutterCm: number;
+  /** Effective margin: 0 when joining borderless. */
   marginCm: number;
+  bleedCm: number;
+  /** True when assembly needs no scissors. */
+  noCut: boolean;
   cols: number;
   rows: number;
   tiles: Tile[];
-  /** Grid cells that hold no image content and are therefore not exported. */
   emptyCells: number;
-  /** Sheet raster size at the chosen DPI. */
   sheetPx: Size;
-  /** Source image pixels per output centimetre. */
   srcPxPerCm: number;
-  /** True resolution of the print: how many source pixels land per printed inch. */
   effectiveDpi: number;
-  /** Largest print size (cm) that still hits the requested DPI natively. */
   nativeMaxCm: Size;
-  /** Fraction of the grid's printable area actually covered by image. */
+  /** Fraction of the grid's span actually covered by image. */
   coverage: number;
-  /** Total pixels across all exported tiles. */
+  /** Fraction of the poster that ends up carrying ink (gutters excluded). */
+  inkedFraction: number;
   totalTilePx: number;
   notices: Notice[];
 }
@@ -162,7 +190,6 @@ export interface Notice {
   body: string;
 }
 
-/** Ceil that ignores floating-point fuzz just below an integer. */
 const ceilFuzzy = (v: number) => Math.ceil(v - 1e-9);
 
 export const MAX_COLS = 200;
@@ -173,34 +200,65 @@ export interface GridBasics {
   sheetCm: Size;
   printableCm: Size;
   stepCm: Size;
-  overlapCm: number;
+  hiddenCm: number;
+  gutterCm: number;
   marginCm: number;
+  bleedCm: number;
+  noCut: boolean;
   valid: boolean;
 }
 
-/** Sheet-level geometry that does not depend on the image. */
+/** Sheet-level geometry, independent of the image. */
 export function gridBasics(s: Settings): GridBasics {
   const sheetCm = sheetSizeCm(s.sheet, s.orientation);
-  const margin = clamp(s.marginCm, 0, Math.min(sheetCm.w, sheetCm.h) / 2 - 0.2);
+  const borderless = s.join === 'borderless';
+  const margin = borderless ? 0 : clamp(s.marginCm, 0, Math.min(sheetCm.w, sheetCm.h) / 2 - 0.2);
   const printableCm: Size = { w: sheetCm.w - 2 * margin, h: sheetCm.h - 2 * margin };
   const valid = printableCm.w > 0.5 && printableCm.h > 0.5;
-  // An overlap can never eat more than 40% of the smaller printable dimension,
-  // otherwise sheets contribute almost nothing and the grid explodes.
-  const maxOverlap = Math.max(0, Math.min(printableCm.w, printableCm.h) * 0.4);
-  const overlapCm = s.overlapEnabled ? clamp(s.overlapCm, 0, maxOverlap) : 0;
-  const stepCm: Size = { w: printableCm.w - overlapCm, h: printableCm.h - overlapCm };
-  return { sheetCm, printableCm, stepCm, overlapCm, marginCm: margin, valid };
+  const maxStrip = Math.max(0, Math.min(printableCm.w, printableCm.h) * 0.4);
+
+  let stepCm: Size;
+  let hiddenCm: number;
+
+  if (s.join === 'trim') {
+    hiddenCm = s.overlapEnabled ? clamp(s.overlapCm, 0, maxStrip) : 0;
+    stepCm = { w: printableCm.w - hiddenCm, h: printableCm.h - hiddenCm };
+  } else if (s.join === 'borderless') {
+    hiddenCm = 0;
+    stepCm = { w: sheetCm.w, h: sheetCm.h };
+  } else if (s.placement === 'tight') {
+    hiddenCm = clamp(s.coverCm, 0, maxStrip);
+    stepCm = { w: sheetCm.w - margin - hiddenCm, h: sheetCm.h - margin - hiddenCm };
+  } else {
+    hiddenCm = 0;
+    stepCm = { w: sheetCm.w, h: sheetCm.h };
+  }
+
+  // Same on both axes by construction; computed from the width for clarity.
+  const gutterCm = Math.max(0, stepCm.w - (printableCm.w - hiddenCm));
+
+  return {
+    sheetCm,
+    printableCm,
+    stepCm,
+    hiddenCm,
+    gutterCm,
+    marginCm: margin,
+    bleedCm: borderless ? clamp(s.bleedCm, 0, Math.min(sheetCm.w, sheetCm.h) * 0.1) : 0,
+    noCut: s.join !== 'trim',
+    valid,
+  };
 }
 
-/** Physical span of a cols × rows grid. */
+/** Physical span of a cols × rows grid: the last sheet contributes its full window. */
 export const gridSpan = (b: GridBasics, cols: number, rows: number): Size => ({
-  w: cols * b.stepCm.w + b.overlapCm,
-  h: rows * b.stepCm.h + b.overlapCm,
+  w: (cols - 1) * b.stepCm.w + b.printableCm.w,
+  h: (rows - 1) * b.stepCm.h + b.printableCm.h,
 });
 
-/** Sheets needed to cover `cm` along an axis whose net step is `step`. */
-export const sheetsFor = (cm: number, step: number, overlap: number) =>
-  Math.max(1, ceilFuzzy((cm - overlap) / step));
+/** Sheets needed to cover `cm` along an axis. */
+export const sheetsFor = (cm: number, step: number, printable: number) =>
+  Math.max(1, ceilFuzzy((cm - printable) / step) + 1);
 
 /**
  * Suggest a cols × rows grid using about `count` sheets whose proportions are
@@ -218,7 +276,6 @@ export function suggestGrid(
     const rows = Math.ceil(n / cols);
     if (cols > MAX_COLS || rows > MAX_ROWS) continue;
     const span = gridSpan(b, cols, rows);
-    // Penalise aspect error, then wasted sheets.
     const aspectErr = Math.abs(Math.log(span.w / span.h) - Math.log(target));
     const waste = (cols * rows - n) / n;
     const score = aspectErr + waste * 0.25;
@@ -233,16 +290,10 @@ export interface CleanFit {
   imageCm: Size;
   sheets: number;
   coverage: number;
-  /** Value to write into `targetCm` for the user's current axis. */
   targetCm: number;
 }
 
-/**
- * Sizes near the current one where the image fills the grid width *exactly*, so
- * there is no sliver column. Asking for, say, 60 cm wide on A4 can land 1.2 cm
- * into a fourth column and cost a whole extra stack of sheets for almost no
- * extra picture; these are the nearby sizes that do not.
- */
+/** Nearby sizes where the image fills the grid width exactly — no sliver column. */
 export function cleanFits(
   b: GridBasics,
   imagePx: Size,
@@ -256,7 +307,7 @@ export function cleanFits(
     if (c > MAX_COLS) continue;
     const w = gridSpan(b, c, 1).w;
     const h = w / aspect;
-    const r = clamp(sheetsFor(h, b.stepCm.h, b.overlapCm), 1, MAX_ROWS);
+    const r = clamp(sheetsFor(h, b.stepCm.h, b.printableCm.h), 1, MAX_ROWS);
     const key = `${c}x${r}`;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -280,14 +331,11 @@ export function requestedImageCm(s: Settings, b: GridBasics, imagePx: Size): Siz
     const v = Math.max(1, s.targetCm);
     return s.targetAxis === 'width' ? { w: v, h: v / aspect } : { w: v * aspect, h: v };
   }
-  // Grid mode.
   const cols = clamp(Math.round(s.cols), 1, MAX_COLS);
   if (s.autoRows) {
-    // Fill the grid width exactly; rows follow from the aspect ratio.
     const w = gridSpan(b, cols, 1).w;
     return { w, h: w / aspect };
   }
-  // Both axes pinned: fit the image inside the grid without distortion.
   const rows = clamp(Math.round(s.rows), 1, MAX_ROWS);
   const span = gridSpan(b, cols, rows);
   const scale = Math.min(span.w / imagePx.w, span.h / imagePx.h);
@@ -302,14 +350,14 @@ export function computeLayout(imagePx: Size, s: Settings): Layout {
     notices.push({
       level: 'error',
       title: 'Margin too large',
-      body: `A ${s.marginCm.toFixed(2)} cm margin leaves no usable area on a ${s.sheet} sheet. Reduce it.`,
+      body: `A ${s.marginCm.toFixed(2)} cm margin leaves no usable area on a ${SHEETS[s.sheet].label} sheet. Reduce it.`,
     });
   }
-  if (s.overlapEnabled && b.overlapCm < s.overlapCm - 1e-6) {
+  if (s.join === 'borderless' && !isBorderlessCapable(s.sheet)) {
     notices.push({
-      level: 'warn',
-      title: 'Overlap clamped',
-      body: `Overlap reduced to ${b.overlapCm.toFixed(2)} cm — it may not exceed 40% of the printable area.`,
+      level: 'error',
+      title: 'This paper size cannot print borderless',
+      body: `${SHEETS[s.sheet].label} has no borderless mode on a typical EcoTank — the L3200 series stops at 13 × 18 cm. Pick 10 × 15 or 13 × 18 cm, or switch to a no-cut join on ${SHEETS[s.sheet].label}.`,
     });
   }
 
@@ -320,11 +368,11 @@ export function computeLayout(imagePx: Size, s: Settings): Layout {
   if (s.mode === 'grid') {
     cols = clamp(Math.round(s.cols), 1, MAX_COLS);
     rows = s.autoRows
-      ? clamp(sheetsFor(imageCm.h, b.stepCm.h, b.overlapCm), 1, MAX_ROWS)
+      ? clamp(sheetsFor(imageCm.h, b.stepCm.h, b.printableCm.h), 1, MAX_ROWS)
       : clamp(Math.round(s.rows), 1, MAX_ROWS);
   } else {
-    cols = clamp(sheetsFor(imageCm.w, b.stepCm.w, b.overlapCm), 1, MAX_COLS);
-    rows = clamp(sheetsFor(imageCm.h, b.stepCm.h, b.overlapCm), 1, MAX_ROWS);
+    cols = clamp(sheetsFor(imageCm.w, b.stepCm.w, b.printableCm.w), 1, MAX_COLS);
+    rows = clamp(sheetsFor(imageCm.h, b.stepCm.h, b.printableCm.h), 1, MAX_ROWS);
   }
 
   const gridCm = gridSpan(b, cols, rows);
@@ -342,28 +390,49 @@ export function computeLayout(imagePx: Size, s: Settings): Layout {
   const digits = Math.max(String(rows).length, String(cols).length) > 1 ? 2 : 1;
   const pad = (n: number) => String(n).padStart(digits, '0');
 
+  // Where the sheet's raster carries image, and how much poster it represents.
+  const destCm: Rect =
+    s.join === 'borderless'
+      ? { x: 0, y: 0, w: b.sheetCm.w, h: b.sheetCm.h }
+      : { x: b.marginCm, y: b.marginCm, w: b.printableCm.w, h: b.printableCm.h };
+
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
-      const box: Rect = {
+      const window: Rect = {
         x: c * b.stepCm.w,
         y: r * b.stepCm.h,
         w: b.printableCm.w,
         h: b.printableCm.h,
       };
-      const contentCm = intersect(box, imageRect);
+      const contentCm = intersect(window, imageRect);
       if (contentCm.w <= EPS || contentCm.h <= EPS) {
         emptyCells++;
         continue;
       }
+
+      // Borderless drivers enlarge the page and spray the excess off the paper,
+      // so hand them extra picture on every edge and the crop lands on the
+      // boundary we designed for.
+      const regionCm = b.bleedCm > 0 ? expand(window, b.bleedCm) : window;
+      const sx = destCm.w / regionCm.w;
+      const sy = destCm.h / regionCm.h;
+      const renderCm = intersect(regionCm, imageRect);
+
       const srcPx: Rect = {
-        x: contentCm.x * srcPxPerCm,
-        y: contentCm.y * srcPxPerCm,
-        w: contentCm.w * srcPxPerCm,
-        h: contentCm.h * srcPxPerCm,
+        x: renderCm.x * srcPxPerCm,
+        y: renderCm.y * srcPxPerCm,
+        w: renderCm.w * srcPxPerCm,
+        h: renderCm.h * srcPxPerCm,
       };
-      // Guard against sub-pixel overshoot from accumulated rounding.
       srcPx.w = Math.min(srcPx.w, imagePx.w - srcPx.x);
       srcPx.h = Math.min(srcPx.h, imagePx.h - srcPx.y);
+
+      const onSheet = (rect: Rect): Rect => ({
+        x: destCm.x + (rect.x - regionCm.x) * sx,
+        y: destCm.y + (rect.y - regionCm.y) * sy,
+        w: rect.w * sx,
+        h: rect.h * sy,
+      });
 
       tiles.push({
         row: r,
@@ -371,9 +440,8 @@ export function computeLayout(imagePx: Size, s: Settings): Layout {
         id: `R${pad(r + 1)}-C${pad(c + 1)}`,
         contentCm,
         srcPx,
-        // Content always starts at the printable box's top-left corner, so the
-        // on-sheet offset is just the margin; only the extent can be clipped.
-        placeCm: { x: b.marginCm, y: b.marginCm, w: contentCm.w, h: contentCm.h },
+        placeCm: onSheet(renderCm),
+        trimCm: onSheet(contentCm),
         partial: contentCm.w < b.printableCm.w - EPS || contentCm.h < b.printableCm.h - EPS,
         neighbors: {
           left: c > 0,
@@ -392,9 +460,17 @@ export function computeLayout(imagePx: Size, s: Settings): Layout {
   };
   const coverage = (imageCm.w * imageCm.h) / (gridCm.w * gridCm.h);
 
+  // Gutters eat this much of the picture.
+  const inkedFraction =
+    b.gutterCm > 0
+      ? ((imageCm.w - Math.max(0, cols - 1) * b.gutterCm) / imageCm.w) *
+        ((imageCm.h - Math.max(0, rows - 1) * b.gutterCm) / imageCm.h)
+      : 1;
+
   let totalTilePx = 0;
   for (const t of tiles) {
-    totalTilePx += Math.round(t.contentCm.w * devicePxPerCm) * Math.round(t.contentCm.h * devicePxPerCm);
+    totalTilePx +=
+      Math.round(t.placeCm.w * devicePxPerCm) * Math.round(t.placeCm.h * devicePxPerCm);
   }
 
   if (tiles.length >= MAX_TILES) {
@@ -402,6 +478,43 @@ export function computeLayout(imagePx: Size, s: Settings): Layout {
       level: 'error',
       title: 'Grid too large',
       body: `Capped at ${MAX_TILES} sheets. Pick a smaller print size, a bigger sheet, or a smaller margin.`,
+    });
+  }
+
+  /* ── Style-specific guidance ─────────────────────────────────────────────── */
+  if (s.join === 'nocut') {
+    const lines = Math.max(0, cols - 1) + Math.max(0, rows - 1);
+    notices.push({
+      level: 'info',
+      title: 'No cutting — white grid lines instead',
+      body:
+        `Your printer leaves ${(b.marginCm * 10).toFixed(1)} mm unprinted at each paper edge, and that band sits on top at every seam, so it cannot be hidden without trimming. ` +
+        `Assembled as-is you get ${lines} white line${lines === 1 ? '' : 's'} of ${(
+          b.gutterCm * 10
+        ).toFixed(1)} mm, evenly spaced — a panel/mosaic look. ` +
+        `${((1 - inkedFraction) * 100).toFixed(1)}% of the picture falls in those lines and is dropped, so everything still lines up across them.` +
+        (s.placement === 'butt'
+          ? ' Switching to "on the printed edge" halves the lines.'
+          : ''),
+    });
+  }
+  if (s.join === 'borderless') {
+    notices.push({
+      level: 'warn',
+      title: 'Borderless: set Expansion, and watch the waste pad',
+      body:
+        `In the Epson driver tick Borderless and set Expansion to Standard — the driver enlarges the page and sprays the excess off the paper, which is what the ${(
+          b.bleedCm * 10
+        ).toFixed(1)} mm bleed here compensates for. ` +
+        `Borderless usually needs a photo paper type, and every borderless page feeds ink into the borderless waste pad, which only a service centre can replace. ` +
+        `${tiles.length} sheets of ${SHEETS[s.sheet].label} is a real amount of that pad's life.`,
+    });
+  }
+  if (s.join === 'trim' && !s.overlapEnabled) {
+    notices.push({
+      level: 'info',
+      title: 'Butt-joint assembly',
+      body: 'Every seam must be trimmed on both sheets and joined edge to edge. Any trimming error shows as a white hairline; an overlap of 3–5 mm makes it forgiving.',
     });
   }
 
@@ -420,7 +533,7 @@ export function computeLayout(imagePx: Size, s: Settings): Layout {
           1,
         )} cm. ` +
         (effectiveDpi < 100
-          ? 'Below roughly 100 DPI the pixels are visible at arm\'s length — fine for a wall-sized piece seen from a distance, soft up close. Upscale the source first if it will be viewed near.'
+          ? "Below roughly 100 DPI the pixels are visible at arm's length — fine for a wall-sized piece seen from a distance, soft up close. Upscale the source first if it will be viewed near."
           : 'Upscale the source first for a crisper print.'),
     });
   }
@@ -434,7 +547,7 @@ export function computeLayout(imagePx: Size, s: Settings): Layout {
           : imageCm.w < gridCm.w - EPS
             ? 'column'
             : 'row'
-      } is partly blank. That is normal — those sheets carry less image and their trim lines sit inside the printable box.`,
+      } is partly blank. That is normal — those sheets simply carry less picture.`,
     });
   }
   if (s.dpi >= 600 && tiles.length > 12) {
@@ -446,13 +559,6 @@ export function computeLayout(imagePx: Size, s: Settings): Layout {
       )} megapixels of output. Expect a slow export and a big file; 300 DPI is indistinguishable on most home printers.`,
     });
   }
-  if (!s.overlapEnabled) {
-    notices.push({
-      level: 'info',
-      title: 'Butt-joint assembly',
-      body: 'With no overlap every seam must be trimmed on both sheets and joined edge-to-edge. Any trimming error shows as a white hairline. An overlap of 3–5 mm makes assembly much more forgiving.',
-    });
-  }
 
   return {
     settings: s,
@@ -462,8 +568,11 @@ export function computeLayout(imagePx: Size, s: Settings): Layout {
     sheetCm: b.sheetCm,
     printableCm: b.printableCm,
     stepCm: b.stepCm,
-    overlapCm: b.overlapCm,
+    hiddenCm: b.hiddenCm,
+    gutterCm: b.gutterCm,
     marginCm: b.marginCm,
+    bleedCm: b.bleedCm,
+    noCut: b.noCut,
     cols,
     rows,
     tiles,
@@ -473,12 +582,31 @@ export function computeLayout(imagePx: Size, s: Settings): Layout {
     effectiveDpi,
     nativeMaxCm,
     coverage,
+    inkedFraction,
     totalTilePx,
     notices,
   };
 }
 
-/** File-safe tile name, e.g. `tile_R01C02`. */
+/** Which marks make sense for a given join style. */
+export function marksAvailable(s: Settings): Record<keyof Omit<MarkOptions, 'color'>, boolean> {
+  const trim = s.join === 'trim';
+  const hasHidden = trim ? s.overlapEnabled : s.join === 'nocut' && s.placement === 'tight';
+  return {
+    trimLines: trim,
+    cornerMarks: trim,
+    edgeTicks: trim,
+    overlapGuides: hasHidden,
+    // With nothing to cut and nothing to hide it under, an id is permanent ink.
+    tileId: true,
+    orientation: trim,
+  };
+}
+
+/** True when a printed mark would survive on the finished poster. */
+export const idIsPermanent = (s: Settings) =>
+  s.join === 'borderless' || (s.join === 'nocut' && s.placement === 'butt');
+
 export const tileFileName = (t: Tile) => `tile_${t.id.replace('-', '')}`;
 
 export function tileAt(layout: Layout, row: number, col: number): Tile | undefined {
