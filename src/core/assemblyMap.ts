@@ -79,6 +79,25 @@ export function assemblySteps(L: Layout): string[] {
     ];
   }
 
+  if (L.hiddenCm > 0 && s.seam === 'cut') {
+    return [
+      sort,
+      `Cut every sheet along the bold dashed lines, on the inside edge of the line. Those lines are set in from the paper edge: on a shared edge they sit ${fmtMm(
+        L.hiddenCm,
+      )} inside the printed picture, because that strip is a duplicate of the neighbouring sheet.`,
+      `Discard the duplicated strips. What is left on each sheet is its own ${L.stepCm.w.toFixed(
+        1,
+      )} × ${L.stepCm.h.toFixed(1)} cm of picture, and nothing else.`,
+      'Butt two cut edges together. They were cut on the same image content, so the picture runs straight through the join with no gap and no step.',
+      'Line the corner crosshairs up across each seam, and check the mid-edge ticks stay in line — that catches skew the corners hide.',
+      `The ${fmtMm(
+        L.hiddenCm,
+      )} of duplicate is the error budget: a cut that wanders by less than that still lands on real picture, never on blank paper.`,
+      'Tape each seam on the back. Work left to right, then downward.',
+      'The last column and row may be narrower — that is expected, the map shows it.',
+    ];
+  }
+
   if (L.hiddenCm > 0) {
     return [
       sort,
@@ -105,7 +124,10 @@ export function joinLabel(L: Layout): string {
   if (s.join === 'borderless') return `borderless, ${fmtMm(L.bleedCm)} bleed`;
   if (s.join === 'nocut')
     return s.placement === 'tight' ? 'no cutting, lapped onto the ink' : 'no cutting, edges butted';
-  return L.hiddenCm > 0 ? `trimmed, ${fmtMm(L.hiddenCm)} overlap` : 'trimmed, butt joint';
+  if (L.hiddenCm === 0) return 'trimmed, butt joint, no overlap';
+  return s.seam === 'cut'
+    ? `cut & butt, ${fmtMm(L.hiddenCm)} duplicated strip discarded`
+    : `lap & glue, ${fmtMm(L.hiddenCm)} overlap`;
 }
 
 export function renderAssemblyMap(

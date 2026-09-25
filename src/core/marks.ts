@@ -121,62 +121,90 @@ export function drawMarks(
     const m = L.marginCm;
     const arm = Math.min(CORNER_ARM, m * 0.85);
     const tick = Math.min(TICK, m * 0.62);
-    // With an overlap you only trim the sheet that goes on top; butt-jointed
-    // sheets are trimmed on every seam.
-    const mustCut =
-      hidden > 0
-        ? { left: n.left, top: n.top, right: false, bottom: false }
-        : { left: n.left, top: n.top, right: n.right, bottom: n.bottom };
+    const cutAtLogical = s.seam === 'cut' && hidden > 0;
 
-    /* Trim lines, offset outward by half a stroke so the line's inner edge is
-       exactly on the picture boundary: cut along the inside and the crop is
-       dead on. */
-    if (marks.trimLines && m > stroke * 2) {
+    /* Where the scissors go.
+       'cut'  — on the logical boundary, i.e. *inside* the duplicated strip. Cut
+                there on both sheets and the two cut edges land on identical
+                image content, so the seam closes with no white gap and no
+                misalignment. The overlap is the error budget: the cut can
+                wander by up to its width and still land on real picture.
+       'lap'  — only the leading edges are cut, and each sheet is laid over its
+                neighbour's strip. */
+    const cutBox = cutAtLogical ? tile.logicalCm : tile.trimCm;
+    const cx0 = cutBox.x;
+    const cy0 = cutBox.y;
+    const cx1 = cutBox.x + cutBox.w;
+    const cy1 = cutBox.y + cutBox.h;
+
+    const mustCut =
+      s.seam === 'cut'
+        ? // Every seam is cut on both sheets; the leading edges only shed blank margin.
+          { left: n.left, top: n.top, right: n.right, bottom: n.bottom }
+        : hidden > 0
+          ? { left: n.left, top: n.top, right: false, bottom: false }
+          : { left: n.left, top: n.top, right: n.right, bottom: n.bottom };
+
+    /* Cut lines. Each is offset outward by half a stroke so the line's inner
+       edge sits exactly on the boundary: cut along the inside of the line and
+       the crop is dead on. */
+    if (marks.trimLines) {
       const cut = [0.2, 0.13];
       const opt = [0.07, 0.11];
       const over = Math.min(arm, m * 0.85);
       const edge = (must: boolean, x1: number, y1: number, x2: number, y2: number) => {
-        g.globalAlpha = must ? 1 : 0.45;
+        g.globalAlpha = must ? 1 : 0.4;
         g.lineWidth = (must ? stroke : stroke * 0.8) * k;
         dash(must ? cut : opt);
         line(x1, y1, x2, y2);
       };
-      edge(mustCut.left, Lx - halfStroke, Ty - over, Lx - halfStroke, By + over);
-      edge(mustCut.right, Rx + halfStroke, Ty - over, Rx + halfStroke, By + over);
-      edge(mustCut.top, Lx - over, Ty - halfStroke, Rx + over, Ty - halfStroke);
-      edge(mustCut.bottom, Lx - over, By + halfStroke, Rx + over, By + halfStroke);
+      // Leading edges are always at the content boundary; trailing edges move
+      // in to the logical boundary when the strip is being discarded.
+      edge(mustCut.left, Lx - halfStroke, cy0 - over, Lx - halfStroke, cy1 + over);
+      edge(mustCut.top, cx0 - over, Ty - halfStroke, cx1 + over, Ty - halfStroke);
+      const rx = cutAtLogical && n.right ? cx1 - halfStroke : Rx + halfStroke;
+      const by = cutAtLogical && n.bottom ? cy1 - halfStroke : By + halfStroke;
+      edge(mustCut.right, rx, cy0 - over, rx, cy1 + over);
+      edge(mustCut.bottom, cx0 - over, by, cx1 + over, by);
       g.globalAlpha = 1;
       noDash();
       g.lineWidth = stroke * k;
     }
 
-    /* Corner registration marks: an L at each corner, arms pointing out into
-       the margin and meeting exactly at the corner. Line two sheets up by
-       making their L's collinear across the seam. */
+    /* Corner crosshairs on the rect that will be left after cutting. A full
+       crosshair is drawn at each corner and the keep-out clip trims whichever
+       arms would fall on surviving picture — which degrades them to clean
+       L-brackets on the leading corners and leaves full crosses inside the
+       discarded strip. Matching them across a seam registers the two sheets. */
     if (marks.cornerMarks && arm > 0.05) {
       g.lineWidth = stroke * 1.6 * k;
       noDash();
-      const corner = (x: number, y: number, dx: number, dy: number) => {
-        line(x, y, x + arm * dx, y);
-        line(x, y, x, y + arm * dy);
+      const cross = (x: number, y: number) => {
+        line(x - arm, y, x + arm, y);
+        line(x, y - arm, x, y + arm);
       };
-      corner(Lx, Ty, -1, -1);
-      corner(Rx, Ty, 1, -1);
-      corner(Lx, By, -1, 1);
-      corner(Rx, By, 1, 1);
+      const rxc = cutAtLogical && n.right ? cx1 : Rx;
+      const byc = cutAtLogical && n.bottom ? cy1 : By;
+      cross(Lx, Ty);
+      cross(rxc, Ty);
+      cross(Lx, byc);
+      cross(rxc, byc);
       g.lineWidth = stroke * k;
     }
 
-    /* Mid-edge ticks: a skew check halfway along each seam. */
+    /* Mid-edge ticks: a skew check halfway along each seam, on the same
+       boundary as the cut lines. */
     if (marks.edgeTicks && tick > 0.05) {
       g.lineWidth = stroke * 1.6 * k;
       noDash();
-      const midX = (Lx + Rx) / 2;
-      const midY = (Ty + By) / 2;
+      const midX = (cx0 + cx1) / 2;
+      const midY = (cy0 + cy1) / 2;
+      const rxt = cutAtLogical && n.right ? cx1 : Rx;
+      const byt = cutAtLogical && n.bottom ? cy1 : By;
       if (n.left) line(Lx, midY, Lx - tick, midY);
-      if (n.right) line(Rx, midY, Rx + tick, midY);
+      if (n.right) line(rxt, midY, rxt + tick, midY);
       if (n.top) line(midX, Ty, midX, Ty - tick);
-      if (n.bottom) line(midX, By, midX, By + tick);
+      if (n.bottom) line(midX, byt, midX, byt + tick);
       g.lineWidth = stroke * k;
     }
 
@@ -217,9 +245,12 @@ export function drawMarks(
 
   /* ── The hidden strip: alignment guide + id, on ink that gets covered ────── */
   if (hidden > 0.02 && (n.right || n.bottom)) {
-    const guides = marks.overlapGuides;
+    const cutSeam = trim && s.seam === 'cut';
+    // In cut mode the logical boundary is already drawn as the cut line, so a
+    // second dashed line on top of it would just be noise.
+    const guides = marks.overlapGuides && !cutSeam;
     const fs = Math.min(hidden * 0.5, 0.26);
-    const labelTarget = trim ? 'lay' : 'cover to here —';
+    const labelTarget = cutSeam ? 'cut & discard — duplicates' : trim ? 'lay' : 'cover to here —';
 
     if (guides) {
       g.globalAlpha = 0.72;
@@ -250,7 +281,7 @@ export function drawMarks(
           (By - hidden / 2) * k,
         );
       }
-      /* In no-cut mode this strip is the only safe place for the id. */
+      /* With no printable margin, this strip is the only safe place for the id. */
       if (!trim && marks.tileId) {
         const label = `${tile.id} of ${L.rows}×${L.cols}`;
         if (n.bottom) {
