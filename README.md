@@ -86,7 +86,7 @@ Every mark lives in a zone that does not survive assembly, and which zones exist
 
 | Join | Legal zones | Marks |
 | --- | --- | --- |
-| trim | margin (cut off) + overlap strip (covered) | trim lines, corner L-marks, mid-edge ticks, overlap guides, id, TOP arrow |
+| trim | margin (cut off) + overlap strip (cut off or covered) | cut lines, corner crosshairs, mid-edge ticks, overlap guides, id, TOP arrow |
 | nocut / tight | cover strip only — the margin is *unprintable* | "cover to here" dashed line + id |
 | nocut / butt | none | id only, opt-in, and permanent |
 | borderless | none | id only, opt-in, and permanent |
@@ -95,8 +95,32 @@ In the first two cases this is enforced by a keep-out clip in `core/marks.ts` ra
 arithmetic — the rasteriser cannot put ink on the finished poster even if a mark is nudged. The clip
 rounds outward to whole device pixels, which also kills antialiasing bleed at the boundary.
 
-In trim mode the overlap means only **one** sheet per seam needs cutting: trim the left and top
-margin of each sheet, then lay it over its neighbour, aligning its cut edge to the guide line.
+### What the overlap is for — two conventions
+
+Trim mode asks one more question, because the same geometry supports two ways of closing a seam:
+
+**Cut & butt** (default, the Rasterbator method). The cut lines are printed **on the logical
+boundary — inside the duplicated strip, not at the sheet edge.** You cut both sheets there, throw the
+duplicated strip away, and the two cut edges meet on *identical image content*, so the picture runs
+straight through the join. The overlap is your error budget: a cut that wanders by less than its
+width still lands on real picture rather than blank paper. Corner crosshairs are drawn on the corners
+of that same logical rect, so matching them across a seam registers the two sheets.
+
+**Lap & glue.** Cut only the leading (left/top) edge of each sheet, then lay it over its neighbour,
+aligning the cut edge to a guide line inside the strip. Half the cuts, but the seam is a lap.
+
+Both are exact; `cut` is what the references describe and is the default.
+
+### Resampling
+
+`Lanczos 3` (default) or `Fast`. Lanczos matters here because a poster is almost always *larger* than
+its source, and `drawImage` upscales with a soft bilinear filter.
+
+The subtle part: each crop is widened by the filter's support radius before resizing, then the region
+of interest is taken back out. Without that, every tile edge would be filtered against a wall of
+clamped pixels and adjacent sheets would disagree along the seam. With it, per-tile Lanczos is
+identical to resizing the whole poster in one go — measured mean difference **0.000/255**. Cost is
+roughly 0.2–0.3 s per sheet; previews always use the fast path.
 
 ### Export
 
@@ -136,6 +160,18 @@ layout maths:
 - **Borderless bleed.** An interior sheet is handed exactly its own window plus 3 mm on every edge,
   filling the page, pre-shrunk to 95.59% so the driver's expansion restores true scale; the first
   sheet's bleed clips at the image edge, leaving white to spray away.
+- **Cut & butt reconstruction.** Keeping only each sheet's logical rect (i.e. discarding the
+  duplicated strip, as the crop marks instruct) and butting them: **0 differing pixels of 24 M**, at
+  5 mm overlap, 10 mm overlap, and on landscape sheets.
+- **Crop-mark placement.** On a sheet with a right-hand neighbour, the cut line is measured at
+  20.00 cm — the logical boundary — while printed content runs to 20.50 cm on a 21 cm sheet. 0 mark
+  pixels fall on the part that survives the cut, 3 609 fall inside the strip that gets discarded, and
+  nothing is printed past the content edge on a shared side.
+- **The advance width itself.** Every tile's crop starts at exactly `N × logical` in source pixels,
+  and each shared edge duplicates exactly the overlap width.
+- **Lanczos.** Exactly the identity at 1:1 (max channel Δ 0); a hard black/white edge stays within a
+  4 px transition through a 4× enlargement; per-tile output matches a single global resize to a mean
+  of 0.000/255.
 - **Seam registration when upscaling.** At 2.5× upscale the shared strip as drawn by one sheet
   versus its neighbour differs by a mean of 0.00/255 (worst single pixel 1/255).
 - **PDF true scale.** Every page 595.276 × 841.890 pt = 21.00 × 29.70 cm; page count = sheets + map.

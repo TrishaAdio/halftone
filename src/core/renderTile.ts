@@ -12,6 +12,8 @@ export interface RenderOptions {
   /** Render at a different density than the export DPI (for on-screen previews). */
   dpi?: number;
   withMarks?: boolean;
+  /** Override the configured resampler — previews use the fast path. */
+  quality?: 'fast' | 'lanczos';
 }
 
 export function sheetSpec(layout: Layout): string {
@@ -48,12 +50,18 @@ export function renderTile(
   g.fillStyle = '#ffffff';
   g.fillRect(0, 0, canvas.width, canvas.height);
 
-  drawResampled(g, image, tile.srcPx, {
-    x: tile.placeCm.x * k,
-    y: tile.placeCm.y * k,
-    w: tile.placeCm.w * k,
-    h: tile.placeCm.h * k,
-  });
+  drawResampled(
+    g,
+    image,
+    tile.srcPx,
+    {
+      x: tile.placeCm.x * k,
+      y: tile.placeCm.y * k,
+      w: tile.placeCm.w * k,
+      h: tile.placeCm.h * k,
+    },
+    { quality: opts.quality ?? layout.settings.resample, srcSize: layout.imagePx },
+  );
 
   if (withMarks) {
     drawMarks(

@@ -52,6 +52,9 @@ export type TargetAxis = 'width' | 'height';
 export type JoinStyle = 'trim' | 'nocut' | 'borderless';
 /** Only meaningful for `nocut`. */
 export type Placement = 'butt' | 'tight';
+/** Only meaningful for `trim`. */
+export type SeamMethod = 'cut' | 'lap';
+export type ResampleQuality = 'lanczos' | 'fast';
 
 export interface MarkOptions {
   cornerMarks: boolean;
@@ -83,6 +86,15 @@ export interface Settings {
   /** `trim` only: seams share a strip so a wandering cut leaves no gap. */
   overlapEnabled: boolean;
   overlapCm: number;
+  /**
+   * `trim` only — what the overlap strip is *for*:
+   *   'cut' cut both sheets on the marks at the logical boundary and discard the
+   *         duplicate, so two cut edges meet on identical content (Rasterbator);
+   *   'lap' cut only the leading edges and lay each sheet over the strip.
+   */
+  seam: SeamMethod;
+  /** Resampling quality for the crop → sheet resize. */
+  resample: ResampleQuality;
   /** `nocut` only. */
   placement: Placement;
   /** `nocut`/`tight` only: ink deliberately sacrificed under the next sheet. */
@@ -112,7 +124,9 @@ export const DEFAULT_SETTINGS: Settings = {
 
   join: 'nocut',
   overlapEnabled: true,
-  overlapCm: 0.4,
+  overlapCm: 0.5,
+  seam: 'cut',
+  resample: 'lanczos',
   placement: 'tight',
   coverCm: 0.4,
   bleedCm: 0.3,
@@ -147,6 +161,12 @@ export interface Tile {
   placeCm: Rect;
   /** The content rect on the sheet — what marks are drawn around. */
   trimCm: Rect;
+  /**
+   * The non-overlapped ("logical") rect on the sheet: the part of this tile that
+   * is unique to it. Everything outside it duplicates a neighbour, so this is
+   * the boundary the crop marks go on and the line the user cuts along.
+   */
+  logicalCm: Rect;
   partial: boolean;
   neighbors: { left: boolean; right: boolean; top: boolean; bottom: boolean };
 }
@@ -442,6 +462,12 @@ export function computeLayout(imagePx: Size, s: Settings): Layout {
         srcPx,
         placeCm: onSheet(renderCm),
         trimCm: onSheet(contentCm),
+        logicalCm: onSheet({
+          x: contentCm.x,
+          y: contentCm.y,
+          w: Math.min(b.stepCm.w, contentCm.w),
+          h: Math.min(b.stepCm.h, contentCm.h),
+        }),
         partial: contentCm.w < b.printableCm.w - EPS || contentCm.h < b.printableCm.h - EPS,
         neighbors: {
           left: c > 0,

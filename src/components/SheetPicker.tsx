@@ -32,7 +32,8 @@ export function SheetPicker({
     if (!el) return;
     el.replaceChildren();
     if (!tile) return;
-    const canvas = renderTile(L, source, tile, { dpi: PREVIEW_DPI, withMarks });
+    // Previews always use the fast resampler; Lanczos is for the export.
+    const canvas = renderTile(L, source, tile, { dpi: PREVIEW_DPI, withMarks, quality: 'fast' });
     canvas.style.width = '100%';
     canvas.style.height = 'auto';
     el.appendChild(canvas);

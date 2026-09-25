@@ -224,6 +224,21 @@ export function Controls({ settings: s, layout: L, patch, patchMarks }: Controls
             ]}
           />
         </Field>
+        <Field label="Resampling" hint={s.resample === 'lanczos' ? 'slower export' : 'instant'}>
+          <Segmented
+            value={s.resample}
+            onChange={(resample) => patch({ resample })}
+            options={[
+              { value: 'lanczos', label: 'Lanczos 3', title: 'Sharper enlargements; a second or two per sheet' },
+              { value: 'fast', label: 'Fast', title: 'Browser bilinear with stepped downscale' },
+            ]}
+          />
+        </Field>
+        <div className="footnote">
+          {s.resample === 'lanczos'
+            ? 'Lanczos keeps edges crisp when the poster is larger than the source, which is the usual case here. Each crop is filtered with its surroundings included, so neighbouring sheets agree exactly along the seam. Previews stay on the fast path.'
+            : 'The browser resizer: instant, but visibly softer on a big enlargement.'}
+        </div>
       </Section>
 
       <Section
@@ -282,6 +297,23 @@ export function Controls({ settings: s, layout: L, patch, patchMarks }: Controls
 
         {s.join === 'trim' && (
           <>
+            <Field label="What the overlap is for">
+              <Segmented
+                value={s.seam}
+                onChange={(seam) => patch({ seam })}
+                options={[
+                  { value: 'cut', label: 'Cut & butt', title: 'Cut both sheets on the marks, discard the duplicate' },
+                  { value: 'lap', label: 'Lap & glue', title: 'Cut leading edges only, lay each sheet over the strip' },
+                ]}
+              />
+            </Field>
+            <div className="footnote">
+              {s.seam === 'cut'
+                ? `The marks sit ${mm(
+                    L.hiddenCm,
+                  )} inside the printed picture, not at the paper edge. Cut there on both sheets, throw the duplicated strip away, and the two cut edges meet on identical content — so the seam closes exactly. The overlap is your error budget: a cut that wanders by less than its width still lands on real picture.`
+                : 'Cut only the leading edge of each sheet, then lay it over its neighbour, aligning the cut edge to the guide line inside the strip. Half the cuts, but the seam is a lap rather than a butt joint.'}
+            </div>
             <Check checked={s.overlapEnabled} onChange={(overlapEnabled) => patch({ overlapEnabled })}>
               Overlap seams (recommended)
             </Check>
@@ -300,11 +332,12 @@ export function Controls({ settings: s, layout: L, patch, patchMarks }: Controls
                 />
               </Field>
             )}
-            <div className="footnote">
-              {s.overlapEnabled
-                ? 'Seamless, at the price of trimming the left and top edge of every sheet. Neighbours repeat this strip, so a cut that wanders by less than its width still leaves no gap.'
-                : 'Seamless, but every seam must be cut on both sheets and butted exactly on the line.'}
-            </div>
+            {!s.overlapEnabled && (
+              <div className="footnote">
+                With no overlap there is no error budget at all: every seam must be cut exactly on the
+                line on both sheets, and any wander shows as a white hairline.
+              </div>
+            )}
           </>
         )}
 
