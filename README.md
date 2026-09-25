@@ -14,21 +14,55 @@ copy to keep around for the five minutes before a print run.
 
 ---
 
+## Joining the sheets
+
+A home printer cannot print its own paper edge. On an Epson EcoTank L3200 that band is
+[3 mm on all four sides](https://files.support.epson.com/docid/cpd6/cpd60185/source/specifications/references/l3250/spex_printable_area_spc_l3250.html),
+and borderless printing stops at 13 × 18 cm — A4 borderless is not offered.
+
+That single fact decides everything. The unprintable band lies at the extreme edge of the sheet, so
+at a seam it is always the topmost layer: **no amount of overlapping can hide it.** Seamless and
+no-cutting are mutually exclusive on A4. So there are three honest options, and the app implements
+all of them:
+
+| Join | Cutting | Seams | Cost |
+| --- | --- | --- | --- |
+| **No cut — on the ink** | none | even 3 mm white lines | 1.7% of the picture lost in the lines |
+| **No cut — edges touch** | none | even 6 mm white lines | 3.5% lost; zero judgement needed |
+| **Trim & overlap** | every sheet | invisible | 20+ careful knife cuts |
+| **Borderless** | none | invisible | 10 × 15 / 13 × 18 photo paper, waste-pad wear |
+
+The white lines are not a defect to apologise for — evenly spaced, they read as a deliberate panel
+grid. What makes that work is that the strip of picture falling inside each gutter is **dropped, not
+squeezed**: every sheet shows the slice belonging to its true physical position, so a diagonal line
+continues correctly across the gap instead of jumping.
+
+**"On the ink"** is the recommended no-cut mode and worth explaining. Instead of butting paper edges
+(which puts two unprinted 3 mm bands side by side, doubling the line), you lay each new sheet so its
+edge lands *on its neighbour's ink*, and the export prints a faint dashed line marking exactly where
+that edge should go. Overshooting is harmless — the gutter stays 3 mm either way — so it is forgiving
+to do by hand, and the guide line, the sheet id and everything else live inside the strip that gets
+covered, so they vanish as you assemble.
+
 ## The geometry
 
-This is the part that has to be physically right, so it is worth stating precisely. All physical
-values are centimetres; pixels only appear at the two boundaries (the source image, and the exported
-raster at the chosen DPI).
+All physical values are centimetres; pixels only appear at the two boundaries (the source image, and
+the exported raster at the chosen DPI). Per axis, with sheet size `S` and margin `m`:
 
 ```
-printable = sheet − 2 × margin          image area available on one sheet
-step      = printable − overlap         what one sheet actually adds to the poster
-grid      = cols × step + overlap       total span of a cols × rows grid
+printable P = S − 2m                 the band of paper that can carry ink
+span(n)     = (n−1) · step + P        physical extent of n sheets
+gutter      = step − (P − hidden)     unprinted gap left between sheets
+
+              step              hidden    gutter
+trim          P − overlap        overlap   0
+nocut/butt    S                  0        2m
+nocut/tight   S − m − cover      cover     m
+borderless    S       (m = 0)     0        0
 ```
 
-The **overlap** is the crux. Neighbouring sheets repeat a strip of picture, so a cut that wanders by
-less than the strip width still leaves no white gap. That repetition means each sheet contributes
-`step`, not `printable` — which is why turning the overlap up can cost you an extra column.
+`hidden` is the strip of a sheet's own ink that its neighbour is laid over — the shared overlap in
+trim mode, the sacrificed cover strip in tight mode. It is also the only place marks may go.
 
 The printed image occupies `[0, imageCm]` in poster coordinates. Tile `(r, c)` carries poster-x
 `[c·step, c·step + printable]`, clipped to the image. Where the clip bites — the last row or column,
@@ -48,23 +82,21 @@ Two ways to drive it, kept in sync so switching modes preserves the physical siz
 
 ### Assembly marks
 
-Every mark lives in one of two zones that do not survive assembly: the **margin**, which gets cut
-off, and the **right/bottom overlap strip**, which the neighbouring sheet is laid on top of. That is
-enforced by a keep-out clip in `core/marks.ts`, not by careful arithmetic — the rasteriser cannot put
-ink on the finished poster even if a mark is nudged.
+Every mark lives in a zone that does not survive assembly, and which zones exist depends on the join:
 
-| Mark | Where | Why |
+| Join | Legal zones | Marks |
 | --- | --- | --- |
-| Dashed trim line | margin, its inner edge exactly on the picture boundary | cut along the inside of the line and the crop is dead on |
-| Corner L-marks | margin, meeting at each corner | make two sheets' L's collinear and the seam is registered |
-| Mid-edge ticks | margin, halfway along each seam | catches skew that corners alone hide |
-| Overlap guide line | inside the right/bottom strip | slide the next sheet until its cut edge sits on the line |
-| Sheet id + spec | margin (top when there is a sheet above, else bottom) | survives shuffling, gets trimmed away |
-| TOP arrow | top margin | sheets get shuffled |
+| trim | margin (cut off) + overlap strip (covered) | trim lines, corner L-marks, mid-edge ticks, overlap guides, id, TOP arrow |
+| nocut / tight | cover strip only — the margin is *unprintable* | "cover to here" dashed line + id |
+| nocut / butt | none | id only, opt-in, and permanent |
+| borderless | none | id only, opt-in, and permanent |
 
-Because the overlap strips only ever need one cut per seam, the recommended procedure is: trim the
-**left and top** margin of every sheet, then lay each over its neighbour. Without an overlap every
-seam is a butt joint and both edges must be cut.
+In the first two cases this is enforced by a keep-out clip in `core/marks.ts` rather than by careful
+arithmetic — the rasteriser cannot put ink on the finished poster even if a mark is nudged. The clip
+rounds outward to whole device pixels, which also kills antialiasing bleed at the boundary.
+
+In trim mode the overlap means only **one** sheet per seam needs cutting: trim the left and top
+margin of each sheet, then lay it over its neighbour, aligning its cut edge to the guide line.
 
 ### Export
 
@@ -90,20 +122,24 @@ paper.
 Checked in a headless browser against a hard-edged synthetic pattern, plus a numeric pass over the
 layout maths:
 
-- **Pixel-exact reconstruction.** At 254 DPI (exactly 100 px/cm) with a source sized so one source
-  pixel is one device pixel, the rendered tiles were cropped on their trim lines and re-assembled.
-  Result: 0 differing pixels out of 6.0 M — and 0 of 11.1 M for a ragged 2 × 5 grid — in four
-  configurations (4 mm overlap, butt joint, ragged grid, landscape sheets).
-- **Mark containment.** Each sheet rendered with and without marks and differenced: 55 613 mark
-  pixels drawn, 0 of them inside the area that survives assembly.
+- **Pixel-exact reconstruction, every join style.** At 254 DPI (exactly 100 px/cm) with a source
+  sized so one source pixel is one device pixel, the rendered sheets were assembled the way hands
+  would — taking only the visible part of each, since the next sheet covers the rest — and compared
+  against the source with the printer's gutters knocked out. **0 differing pixels of 24 M** for each
+  of: trim + overlap, trim butt joint, no-cut edges-touching, no-cut on-the-ink, the same in
+  landscape, and borderless.
+- **Gutter arithmetic.** Measured against the model on A4 with a 3 mm margin: trim 0 mm, no-cut
+  butt 6.0 mm, no-cut tight 3.0 mm, borderless 0 mm; and `span == (cols−1)·step + printable` holds
+  for all five.
+- **Mark containment.** Sheets rendered with and without marks and differenced: 26 495 mark pixels
+  drawn in no-cut mode, **0** inside surviving artwork and **0** in the unprintable margin.
+- **Borderless bleed.** An interior sheet is handed exactly its own window plus 3 mm on every edge,
+  filling the page, pre-shrunk to 95.59% so the driver's expansion restores true scale; the first
+  sheet's bleed clips at the image edge, leaving white to spray away.
 - **Seam registration when upscaling.** At 2.5× upscale the shared strip as drawn by one sheet
   versus its neighbour differs by a mean of 0.00/255 (worst single pixel 1/255).
 - **PDF true scale.** Every page 595.276 × 841.890 pt = 21.00 × 29.70 cm; page count = sheets + map.
 - **DPI tagging.** Exported tile PNGs read back at the density they were exported at.
-- **Layout maths.** A4 printable 20.0 × 28.7 cm and step 19.6 × 28.3 cm at 5 mm margin / 4 mm
-  overlap; a 1 × 1 grid spans exactly the printable box; every seam duplicates exactly the overlap
-  width; the last tile's crop reaches the source's far corner; `ceil` does not overshoot on an exact
-  fit.
 
 ## Layout of the source
 
@@ -124,6 +160,13 @@ src/components/  UI
 
 ## Notes and limits
 
+- The 3 mm margin default matches the L3200 series. If the white lines come out wider than the app
+  predicts, your printer's real unprintable band is wider — measure it off a test print and set the
+  margin to match. No-cut mode is forgiving about this: a wrong margin only changes the gutter width,
+  it never breaks the alignment. Trim mode is not — there the margin sets where you cut.
+- Borderless wears a dedicated waste pad that absorbs the over-spray, and only a service centre can
+  replace it. A 25-sheet borderless poster is a real bite out of its life; that is the main reason
+  no-cut is the default rather than borderless.
 - Colours pass through untouched and assume sRGB. Printer, driver and paper calibration decide the
   rest — print one sheet as a test before committing twenty.
 - Upscaling places and interpolates pixels; it does not invent detail. Run an AI upscale first if the

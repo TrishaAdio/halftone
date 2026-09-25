@@ -1,14 +1,13 @@
 /**
  * The assembly map: one extra sheet that goes first in every export. It carries
  * the labelled grid, the exact print specification, and the order of operations
- * for gluing the poster up. Printed or kept on screen, it is the index that
- * tells you which sheet goes where.
+ * for putting the poster up.
  */
 
 import { MARK_COLORS, type Layout } from './layout.ts';
-import { drawOverlay, PRINT_THEME } from './overlay.ts';
+import { drawGutters, drawOverlay, PRINT_THEME } from './overlay.ts';
 import { createCanvas, drawResampled } from './resample.ts';
-import { pxPerCm, SHEETS } from './units.ts';
+import { fmtMm, pxPerCm, SHEETS } from './units.ts';
 
 const INK = '#111111';
 const MUTED = '#5c5c5c';
@@ -16,6 +15,97 @@ const RULE = '#c8c8c8';
 
 export interface MapMeta {
   fileName: string;
+}
+
+/** What to do at the printer, before any assembly. */
+export function printSteps(L: Layout): string[] {
+  const steps: string[] = [];
+  if (L.settings.join === 'borderless') {
+    steps.push(
+      'In the Epson driver: tick Borderless, set Expansion to Standard, and choose the photo paper type you are using.',
+    );
+  }
+  steps.push(
+    'Print every sheet at 100% scale. In the print dialog choose "Actual size" and turn OFF "Fit to page" / "Shrink oversized pages".',
+  );
+  steps.push(
+    `Before printing the rest, check sheet 1 with a ruler: the printed block should measure ${L.printableCm.w.toFixed(
+      1,
+    )} × ${L.printableCm.h.toFixed(1)} cm. Keep every sheet the same way up.`,
+  );
+  return steps;
+}
+
+/** Numbered procedure, tailored to how these sheets will actually be joined. */
+export function assemblySteps(L: Layout): string[] {
+  const s = L.settings;
+  const sort = `Lay the sheets out using the ${L.cols}×${L.rows} map above, row by row.`;
+  const gutter = fmtMm(L.gutterCm);
+
+  if (s.join === 'borderless') {
+    return [
+      sort,
+      `Nothing to cut. The ink runs to all four edges, so simply butt the paper edges together — they touch, and the picture continues across the join.`,
+      'Tape each seam on the back so the join stays flat. Work left to right, then downward.',
+      `If a thin white edge appears at a seam, raise Expansion in the driver. If the picture is losing more than it should at the joins, lower the bleed setting (currently ${fmtMm(
+        L.bleedCm,
+      )}) and re-export.`,
+    ];
+  }
+
+  if (s.join === 'nocut' && s.placement === 'tight') {
+    return [
+      sort,
+      'Nothing needs cutting. Start with the top-left sheet, face up.',
+      `Lay the next sheet to its right so the next sheet's left paper edge just covers the thin dashed line near the right of the printed area. Covering slightly more is harmless — the white line stays ${gutter} either way.`,
+      `Do the same downward: the sheet below covers the dashed line along the bottom edge.`,
+      `Each seam shows a ${gutter} white line, because your printer cannot print its own paper edge. Those lines are even across the whole poster, which is what makes it read as a panel grid rather than a mistake.`,
+      'Tape or glue each seam on the back. Work left to right, then downward.',
+      'The dashed guides and sheet ids sit inside the covered strip, so they disappear as you go. Only the very last sheet has no id — it is the one left over.',
+    ];
+  }
+
+  if (s.join === 'nocut') {
+    return [
+      sort,
+      'Nothing needs cutting. Butt the paper edges together so they just touch — no overlap, no measuring.',
+      `Each seam shows a ${gutter} white line: two unprinted paper edges of ${fmtMm(
+        L.marginCm,
+      )} side by side. They are even across the poster.`,
+      'Tape each seam on the back. Work left to right, then downward.',
+      `To halve those lines to ${fmtMm(
+        L.marginCm,
+      )}, re-export with the "on the printed edge" placement, which laps each sheet onto its neighbour's ink instead.`,
+    ];
+  }
+
+  if (L.hiddenCm > 0) {
+    return [
+      sort,
+      'Trim ONLY the left and top margin of each sheet, cutting along the inside edge of the bold dashed line.',
+      'Place the top-left sheet first. Leave its right and bottom margins on.',
+      'Lay each following sheet over the previous one so its cut edge lands exactly on the dashed guide line inside the tinted strip.',
+      'Check the corner marks: the L-shapes of both sheets must line up and the mid-edge ticks must stay in line.',
+      'Tape the seam on the back, or glue the strip. Work left to right, then down.',
+      'The last column and row may be narrower — that is expected, the map shows it.',
+    ];
+  }
+
+  return [
+    sort,
+    'Trim EVERY edge that meets another sheet, cutting along the inside edge of the bold dashed line.',
+    'Butt the cut edges together — no overlap. Match the corner L-marks across each seam.',
+    'Tape the seam on the back so the join stays flat.',
+    'Any cutting error shows as a white hairline; a 3–5 mm overlap avoids that.',
+  ];
+}
+
+export function joinLabel(L: Layout): string {
+  const s = L.settings;
+  if (s.join === 'borderless') return `borderless, ${fmtMm(L.bleedCm)} bleed`;
+  if (s.join === 'nocut')
+    return s.placement === 'tight' ? 'no cutting, lapped onto the ink' : 'no cutting, edges butted';
+  return L.hiddenCm > 0 ? `trimmed, ${fmtMm(L.hiddenCm)} overlap` : 'trimmed, butt joint';
 }
 
 export function renderAssemblyMap(
@@ -68,13 +158,12 @@ export function renderAssemblyMap(
     'right',
   );
   y += 0.42;
-  g.fillStyle = MUTED;
   font(0.28);
   const src = meta.fileName ? `${meta.fileName} · ` : '';
   text(
-    `${src}${L.imagePx.w} × ${L.imagePx.h} px  ·  final print ${L.imageCm.w.toFixed(1)} × ${L.imageCm.h.toFixed(
+    `${src}${L.imagePx.w} × ${L.imagePx.h} px  ·  final print ${L.imageCm.w.toFixed(
       1,
-    )} cm`,
+    )} × ${L.imageCm.h.toFixed(1)} cm  ·  ${joinLabel(L)}`,
     pad,
     y,
   );
@@ -83,7 +172,7 @@ export function renderAssemblyMap(
   y += 0.55;
 
   /* ── The map itself ─────────────────────────────────────────────────────── */
-  const budgetH = L.sheetCm.h * 0.44;
+  const budgetH = L.sheetCm.h * 0.42;
   const mapScale = Math.min(innerW / L.gridCm.w, budgetH / L.gridCm.h);
   const mapW = L.gridCm.w * mapScale;
   const mapH = L.gridCm.h * mapScale;
@@ -91,10 +180,10 @@ export function renderAssemblyMap(
 
   g.save();
   g.translate(mapX * k, y * k);
-  const scalePx = mapScale * k; // px per poster-cm
+  const scalePx = mapScale * k;
 
-  // Faded thumbnail: light enough that the ids and seams stay legible, and it
-  // keeps the reference page cheap to print.
+  // Faded thumbnail: light enough that ids and seams stay legible, and cheap to
+  // print on a reference page.
   g.save();
   g.globalAlpha = 0.5;
   drawResampled(
@@ -105,16 +194,16 @@ export function renderAssemblyMap(
   );
   g.restore();
 
+  drawGutters(g, L, scalePx, '#ffffff');
   drawOverlay(g, L, {
     scale: scalePx,
     theme: PRINT_THEME,
     showIds: true,
-    showOverlap: L.overlapCm > 0,
+    showOverlap: L.hiddenCm > 0,
     idFontPx: Math.max(0.16 * k, Math.min(L.stepCm.w * scalePx * 0.24, 0.42 * k)),
   });
   g.restore();
 
-  // Physical size callouts along the map edges.
   g.fillStyle = MUTED;
   font(0.26);
   text(`${L.imageCm.w.toFixed(1)} cm`, mapX + (L.imageCm.w * mapScale) / 2, y + mapH + 0.4, 'center');
@@ -141,17 +230,29 @@ export function renderAssemblyMap(
     ['Final print size', `${L.imageCm.w.toFixed(1)} × ${L.imageCm.h.toFixed(1)} cm`],
     ['Sheets', `${L.cols} cols × ${L.rows} rows = ${L.tiles.length}`],
     ['Paper', `${SHEETS[s.sheet].label} ${s.orientation}, ${L.sheetCm.w} × ${L.sheetCm.h} cm`],
+    ['Join', joinLabel(L)],
     ['Print scale', '100% / "Actual size" — do not fit to page'],
     ['Export density', `${s.dpi} DPI (${L.sheetPx.w} × ${L.sheetPx.h} px per sheet)`],
     ['Effective detail', `${Math.round(L.effectiveDpi)} DPI from source`],
-    ['Margin trimmed', `${(L.marginCm * 10).toFixed(0)} mm each edge`],
-    [
-      'Overlap',
-      L.overlapCm > 0 ? `${(L.overlapCm * 10).toFixed(1)} mm shared per seam` : 'none — butt joint',
-    ],
-    ['Image per sheet', `${L.printableCm.w.toFixed(1)} × ${L.printableCm.h.toFixed(1)} cm`],
-    ['Net gain per sheet', `${L.stepCm.w.toFixed(1)} × ${L.stepCm.h.toFixed(1)} cm`],
   ];
+  if (s.join === 'borderless') {
+    specs.push(['Bleed per edge', `${fmtMm(L.bleedCm)} (driver Expansion: Standard)`]);
+    specs.push(['Unprinted margin', 'none — edge to edge']);
+  } else {
+    specs.push(['Unprintable margin', `${fmtMm(L.marginCm)} each edge`]);
+  }
+  if (L.gutterCm > 0) {
+    specs.push(['White line per seam', fmtMm(L.gutterCm)]);
+    specs.push(['Picture inked', `${(L.inkedFraction * 100).toFixed(1)}%`]);
+  }
+  if (L.hiddenCm > 0) {
+    specs.push([
+      s.join === 'trim' ? 'Overlap per seam' : 'Covered strip',
+      fmtMm(L.hiddenCm),
+    ]);
+  }
+  specs.push(['Image per sheet', `${L.printableCm.w.toFixed(1)} × ${L.printableCm.h.toFixed(1)} cm`]);
+  specs.push(['Gain per sheet', `${L.stepCm.w.toFixed(1)} × ${L.stepCm.h.toFixed(1)} cm`]);
 
   g.fillStyle = INK;
   font(0.32, '700');
@@ -167,31 +268,10 @@ export function renderAssemblyMap(
     ly += lh;
   }
 
-  const steps = L.overlapCm > 0
-    ? [
-        `Print every sheet at 100% scale. Turn off "fit to page" / "shrink to fit".`,
-        `Sort the sheets by the ${L.cols}×${L.rows} map above, row by row.`,
-        `Trim only the LEFT and TOP margin of each sheet, cutting along the inside of the bold dashed line.`,
-        `Start with R1-C1 at the top-left. Leave its right and bottom margins on.`,
-        `Lay the next sheet over the previous one so its cut edge lands exactly on the dashed guide line inside the tinted strip.`,
-        `Check the corner marks: the L-shapes of both sheets must line up and the mid-edge ticks must stay in line.`,
-        `Tape the seam on the back, or glue the strip. Work left to right, then down.`,
-        `The last column and row may be narrower — that is expected, the map shows it.`,
-      ]
-    : [
-        `Print every sheet at 100% scale. Turn off "fit to page" / "shrink to fit".`,
-        `Sort the sheets by the ${L.cols}×${L.rows} map above, row by row.`,
-        `Trim EVERY edge that meets another sheet, cutting along the inside of the bold dashed line.`,
-        `Butt the cut edges together — no overlap. Match the corner L-marks across each seam.`,
-        `Tape the seam on the back so the join stays flat.`,
-        `Work left to right, then down, keeping the corner marks aligned.`,
-        `Any cutting error shows as a white hairline; an overlap of 3–5 mm avoids that.`,
-      ];
-
   let ry = y + 0.55;
   font(0.27);
   let n = 1;
-  for (const step of steps) {
+  for (const step of [...printSteps(L), ...assemblySteps(L)]) {
     const lines = wrap(g, step, (colW - 0.55) * k);
     g.fillStyle = MUTED;
     text(`${n}.`, rightX, ry);
@@ -207,17 +287,11 @@ export function renderAssemblyMap(
   y = Math.max(ly, ry) + 0.4;
 
   /* ── Legend ─────────────────────────────────────────────────────────────── */
-  rule(y);
-  y += 0.5;
   const mark = MARK_COLORS[s.marks.color];
-  g.fillStyle = INK;
-  font(0.3, '700');
-  text('MARKS ON EACH SHEET', leftX, y);
-  y += 0.5;
-  font(0.26);
+  const legend: Array<[string, (x: number, yy: number) => void]> = [];
 
-  const legend: Array<[string, (x: number, yy: number) => void]> = [
-    [
+  if (s.join === 'trim') {
+    legend.push([
       'Bold dashed line — cut here (inside edge of the line)',
       (x, yy) => {
         g.strokeStyle = mark;
@@ -229,8 +303,8 @@ export function renderAssemblyMap(
         g.stroke();
         g.setLineDash([]);
       },
-    ],
-    [
+    ]);
+    legend.push([
       'Corner L-marks — make them collinear across each seam',
       (x, yy) => {
         g.strokeStyle = mark;
@@ -241,8 +315,8 @@ export function renderAssemblyMap(
         g.lineTo((x + 0.32) * k, yy * k);
         g.stroke();
       },
-    ],
-    [
+    ]);
+    legend.push([
       'Mid-edge tick — a skew check halfway along each seam',
       (x, yy) => {
         g.strokeStyle = mark;
@@ -252,23 +326,13 @@ export function renderAssemblyMap(
         g.lineTo((x + 0.45) * k, yy * k);
         g.stroke();
       },
-    ],
-    [
-      'Sheet id and the TOP arrow sit in the margin and are cut away',
-      (x, yy) => {
-        g.fillStyle = mark;
-        g.beginPath();
-        g.moveTo((x + 0.45) * k, (yy - 0.22) * k);
-        g.lineTo((x + 0.28) * k, yy * k);
-        g.lineTo((x + 0.62) * k, yy * k);
-        g.closePath();
-        g.fill();
-      },
-    ],
-  ];
-  if (L.overlapCm > 0) {
-    legend.splice(1, 0, [
-      'Tinted strip — shared picture, hidden under the next sheet',
+    ]);
+  }
+  if (L.hiddenCm > 0) {
+    legend.push([
+      s.join === 'trim'
+        ? 'Tinted strip — shared picture, hidden under the next sheet'
+        : 'Dashed line near the edge — cover it with the next sheet',
       (x, yy) => {
         g.fillStyle = 'rgba(255,0,168,0.18)';
         g.fillRect(x * k, (yy - 0.26) * k, 0.9 * k, 0.3 * k);
@@ -283,13 +347,36 @@ export function renderAssemblyMap(
       },
     ]);
   }
+  if (L.gutterCm > 0) {
+    legend.push([
+      `White line of ${fmtMm(L.gutterCm)} at every seam — the paper edge your printer cannot reach`,
+      (x, yy) => {
+        g.fillStyle = '#e8e8e8';
+        g.fillRect(x * k, (yy - 0.26) * k, 0.9 * k, 0.3 * k);
+        g.fillStyle = '#b8b8b8';
+        g.fillRect((x + 0.4) * k, (yy - 0.26) * k, 0.1 * k, 0.3 * k);
+      },
+    ]);
+  }
 
-  for (const [label, swatch] of legend) {
-    swatch(leftX, y);
+  if (legend.length) {
+    rule(y);
+    y += 0.5;
     g.fillStyle = INK;
-    font(0.26);
-    text(label, leftX + 1.15, y);
-    y += 0.42;
+    font(0.3, '700');
+    text('ON EACH SHEET', leftX, y);
+    y += 0.5;
+    for (const [label, swatch] of legend) {
+      swatch(leftX, y);
+      g.fillStyle = INK;
+      font(0.26);
+      const lines = wrap(g, label, (innerW - 1.2) * k);
+      for (const ln of lines) {
+        text(ln, leftX + 1.15, y);
+        y += 0.38;
+      }
+      y += 0.06;
+    }
   }
 
   /* ── Footer ─────────────────────────────────────────────────────────────── */
@@ -344,11 +431,12 @@ export function renderMapThumb(
     { x: 0, y: 0, w: L.imageCm.w * scale, h: L.imageCm.h * scale },
   );
   g.restore();
+  drawGutters(g, L, scale, '#ffffff');
   drawOverlay(g, L, {
     scale,
     theme: PRINT_THEME,
     showIds: true,
-    showOverlap: L.overlapCm > 0,
+    showOverlap: L.hiddenCm > 0,
   });
   return canvas;
 }

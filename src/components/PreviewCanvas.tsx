@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { Layout } from '../core/layout.ts';
-import { drawOverlay, SCREEN_THEME } from '../core/overlay.ts';
+import { drawGutters, drawOverlay, SCREEN_THEME } from '../core/overlay.ts';
 import { drawResampled } from '../core/resample.ts';
 
 export interface PreviewProps {
@@ -69,6 +69,10 @@ export function PreviewCanvas(props: PreviewProps) {
       { x: 0, y: 0, w: sourcePx.w, h: sourcePx.h },
       { x: 0, y: 0, w: L.imageCm.w * scale, h: L.imageCm.h * scale },
     );
+
+    // Gutters are what the wall will really look like, not an annotation, so
+    // they belong in the clean view too.
+    drawGutters(g, L, scale, '#f2f2f2');
 
     if (props.showGrid) {
       drawOverlay(g, L, {

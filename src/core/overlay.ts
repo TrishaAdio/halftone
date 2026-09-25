@@ -91,19 +91,19 @@ export function drawOverlay(g: CanvasRenderingContext2D, L: Layout, o: OverlayOp
     g.restore();
   }
 
-  /* Overlap bands: the strip of picture that two sheets share. */
-  if (o.showOverlap && L.overlapCm > 0) {
+  /* Shared/covered strips: picture that two sheets both carry. */
+  if (o.showOverlap && L.hiddenCm > 0) {
     g.fillStyle = t.overlapFill;
     for (let c = 1; c < L.cols; c++) {
       const x = c * L.stepCm.w;
       if (x >= L.imageCm.w) break;
-      const w = Math.min(L.overlapCm, L.imageCm.w - x);
+      const w = Math.min(L.hiddenCm, L.imageCm.w - x);
       g.fillRect(x * s, 0, w * s, Math.min(L.imageCm.h, L.gridCm.h) * s);
     }
     for (let r = 1; r < L.rows; r++) {
       const y = r * L.stepCm.h;
       if (y >= L.imageCm.h) break;
-      const h = Math.min(L.overlapCm, L.imageCm.h - y);
+      const h = Math.min(L.hiddenCm, L.imageCm.h - y);
       g.fillRect(0, y * s, Math.min(L.imageCm.w, L.gridCm.w) * s, h * s);
     }
   }
@@ -123,7 +123,52 @@ export function drawOverlay(g: CanvasRenderingContext2D, L: Layout, o: OverlayOp
     }
   }
 
-  /* Seam lines: where the overlying sheet's cut edge falls. */
+  /* Seam lines: where the overlying sheet's cut edge falls. When there are
+     gutters, the white bands drawn by `drawGutters` already mark every seam, so
+     an extra line would only add noise. */
+  const seams: Array<[number, number, number, number]> = L.gutterCm > 0 ? [] : seamLines(L);
+  drawSeams(g, seams, s, t, hair);
+
+  /* Image bounds. */
+  g.strokeStyle = t.bounds;
+  g.lineWidth = hair * 1.5;
+  g.strokeRect(0, 0, L.imageCm.w * s, L.imageCm.h * s);
+
+  drawIds(g, L, o, t, s);
+  g.restore();
+}
+
+/**
+ * The unprinted gaps a no-cut assembly leaves between sheets, painted in paper
+ * white. This is not decoration — it is what the wall will actually look like,
+ * so it belongs in the clean preview as much as in the annotated one.
+ */
+export function drawGutters(
+  g: CanvasRenderingContext2D,
+  L: Layout,
+  scale: number,
+  paper = '#ffffff',
+): void {
+  if (L.gutterCm <= 0) return;
+  const s = scale;
+  const band = L.printableCm.w - L.hiddenCm;
+  const bandH = L.printableCm.h - L.hiddenCm;
+  g.save();
+  g.fillStyle = paper;
+  for (let c = 0; c < L.cols - 1; c++) {
+    if (L.imageCm.w <= (c + 1) * L.stepCm.w + 1e-7) break;
+    const x = c * L.stepCm.w + band;
+    g.fillRect(x * s, 0, Math.min(L.gutterCm, L.imageCm.w - x) * s, L.imageCm.h * s);
+  }
+  for (let r = 0; r < L.rows - 1; r++) {
+    if (L.imageCm.h <= (r + 1) * L.stepCm.h + 1e-7) break;
+    const y = r * L.stepCm.h + bandH;
+    g.fillRect(0, y * s, L.imageCm.w * s, Math.min(L.gutterCm, L.imageCm.h - y) * s);
+  }
+  g.restore();
+}
+
+function seamLines(L: Layout): Array<[number, number, number, number]> {
   const seams: Array<[number, number, number, number]> = [];
   for (let c = 1; c < L.cols; c++) {
     const x = c * L.stepCm.w;
@@ -135,6 +180,19 @@ export function drawOverlay(g: CanvasRenderingContext2D, L: Layout, o: OverlayOp
     if (y >= L.imageCm.h - 1e-9) break;
     seams.push([0, y, Math.min(L.imageCm.w, L.gridCm.w), y]);
   }
+  return seams;
+}
+
+function drawSeams(
+  g: CanvasRenderingContext2D,
+  seams: Array<[number, number, number, number]>,
+  s: number,
+  t: OverlayTheme,
+  hair: number,
+): void {
+  if (seams.length === 0) return;
+  // Two passes: a dark halo, then the light line, so seams stay readable over
+  // both a bright sky and a black shadow.
   for (const pass of [0, 1]) {
     g.strokeStyle = pass === 0 ? t.seamShadow : t.seam;
     g.lineWidth = pass === 0 ? hair * 3 : hair * 1.2;
@@ -145,15 +203,18 @@ export function drawOverlay(g: CanvasRenderingContext2D, L: Layout, o: OverlayOp
     }
     g.stroke();
   }
+}
 
-  /* Image bounds. */
-  g.strokeStyle = t.bounds;
-  g.lineWidth = hair * 1.5;
-  g.strokeRect(0, 0, L.imageCm.w * s, L.imageCm.h * s);
-
-  /* Tile ids, centred on each sheet's unique (non-overlapped) area. A sliver of
-     a last column has very little room, so the label shrinks, then falls back
-     to its short form, and is dropped only if even that cannot fit. */
+/* Tile ids, centred on each sheet's unique area. A sliver of a last column has
+   very little room, so the label shrinks, then falls back to its short form,
+   and is dropped only if even that cannot fit. */
+function drawIds(
+  g: CanvasRenderingContext2D,
+  L: Layout,
+  o: OverlayOptions,
+  t: OverlayTheme,
+  s: number,
+): void {
   if (o.showIds) {
     const cellW = L.stepCm.w * s;
     const cellH = L.stepCm.h * s;
@@ -192,8 +253,6 @@ export function drawOverlay(g: CanvasRenderingContext2D, L: Layout, o: OverlayOp
       }
     }
   }
-
-  g.restore();
 }
 
 export function roundRect(

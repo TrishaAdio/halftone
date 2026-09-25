@@ -1,6 +1,6 @@
 import type { Layout, Notice } from '../core/layout.ts';
 import type { LoadedImage } from '../core/imageMeta.ts';
-import { aspectLabel, SHEETS } from '../core/units.ts';
+import { aspectLabel, fmtMm, SHEETS } from '../core/units.ts';
 import { KV, Section } from './ui.tsx';
 
 export function Summary({ layout: L, image }: { layout: Layout; image: LoadedImage }) {
@@ -48,6 +48,17 @@ export function Summary({ layout: L, image }: { layout: Layout; image: LoadedIma
           ['Native size at ' + L.settings.dpi + ' DPI', `${L.nativeMaxCm.w.toFixed(1)} × ${L.nativeMaxCm.h.toFixed(1)} cm`, true],
           ['Sheets to print', `${sheets}${L.emptyCells ? ` (+${L.emptyCells} blank, skipped)` : ''}`],
           ['Seams to join', `${seams}`],
+          ['Cutting needed', L.noCut ? 'none' : 'every seam', L.noCut],
+          [
+            'White line per seam',
+            L.gutterCm > 0 ? fmtMm(L.gutterCm) : 'none — seamless',
+            L.gutterCm === 0,
+          ],
+          ...(L.gutterCm > 0
+            ? ([['Picture inked', `${(L.inkedFraction * 100).toFixed(1)}%`, true]] as Array<
+                [string, string, boolean]
+              >)
+            : []),
           ['Poster area', `${posterM2.toFixed(2)} m²`],
           ['Paper used', `${paperM2.toFixed(2)} m²`, true],
           ['Output pixels', `${(L.totalTilePx / 1e6).toFixed(1)} MP total`, true],
